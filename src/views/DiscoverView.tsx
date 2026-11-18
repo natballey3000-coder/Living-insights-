@@ -21,6 +21,7 @@ interface DiscoverViewProps {
 const TYPE_TABS: Array<{ id: ResourceType | 'all'; label: string }> = [
   { id: 'all', label: 'All Resources' },
   { id: 'sermon', label: 'Sermons' },
+  { id: 'video', label: 'Videos' },
   { id: 'article', label: 'Articles' },
   { id: 'podcast', label: 'Podcasts' },
   { id: 'confession', label: 'Confessions' },
@@ -404,14 +405,14 @@ export const DiscoverView: React.FC<DiscoverViewProps> = ({
                   </div>
 
                   <div className="flex sm:flex-col items-center sm:items-end gap-2 shrink-0 pt-2 sm:pt-0">
-                    {item.mediaUrl && (
+                    {(item.mediaUrl || item.fallbackMediaUrl) && (
                       <button
                         type="button"
                         onClick={() => onPlayAudio(item)}
                         className="inline-flex items-center gap-1.5 px-4 py-2 min-h-[40px] text-xs font-semibold text-white bg-[#1D3557] hover:bg-[#152844] rounded-md transition-colors whitespace-nowrap cursor-pointer"
                       >
                         <Play className="w-3.5 h-3.5" aria-hidden="true" />
-                        <span>Listen</span>
+                        <span>{item.type === 'video' ? 'Audio Alt' : 'Listen'}</span>
                       </button>
                     )}
                     <button

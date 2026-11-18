@@ -15,6 +15,7 @@ import type { FeaturedSeries, LifeTopic, UnifiedResource } from './types/platfor
 interface OverviewPayload {
   stats: {
     sermonsCount: number;
+    videosCount?: number;
     articlesCount: number;
     podcastsCount: number;
     confessionsCount: number;
@@ -25,6 +26,7 @@ interface OverviewPayload {
   featuredSeries: FeaturedSeries[];
   categories: Array<{ id: string; name: string; topic: string; description: string }>;
   recentSermons: UnifiedResource[];
+  recentVideos: UnifiedResource[];
   recentArticles: UnifiedResource[];
   recentPodcasts: UnifiedResource[];
   announcementsHtml: string;
@@ -103,16 +105,16 @@ export default function App() {
   }, []);
 
   const handlePlayAudio = useCallback(async (res: UnifiedResource) => {
-    if (res.mediaUrl) {
+    if (res.mediaUrl || res.fallbackMediaUrl) {
       setAudioTrack(res);
       return;
     }
-    if (res.type === 'sermon' || res.type === 'podcast') {
+    if (res.type === 'sermon' || res.type === 'podcast' || res.type === 'video') {
       try {
         const r = await fetch(`/api/resources/${encodeURIComponent(res.id)}`);
         if (r.ok) {
           const data = await r.json();
-          if (data?.resource?.mediaUrl) {
+          if (data?.resource?.mediaUrl || data?.resource?.fallbackMediaUrl) {
             setAudioTrack(data.resource);
             return;
           }
@@ -183,6 +185,7 @@ export default function App() {
         ) : activeTab === 'watch' ? (
           <WatchListenView
             recentSermons={overview?.recentSermons || []}
+            recentVideos={overview?.recentVideos || []}
             recentPodcasts={overview?.recentPodcasts || []}
             featuredSeries={overview?.featuredSeries || []}
             categories={overview?.categories || []}
@@ -198,6 +201,7 @@ export default function App() {
             stats={
               overview?.stats || {
                 sermonsCount: 0,
+                videosCount: 0,
                 articlesCount: 0,
                 podcastsCount: 0,
                 confessionsCount: 13,

@@ -112,26 +112,40 @@ export const ResourceDetailView: React.FC<ResourceDetailViewProps> = ({
 
         {/* Actions */}
         <div className="mt-6 flex flex-wrap items-center gap-3">
-          {fullItem.mediaUrl && (
+          {(fullItem.mediaUrl || fullItem.fallbackMediaUrl) && (
             <button
               type="button"
               onClick={() => onPlayAudio(fullItem)}
               className="inline-flex items-center gap-2 px-5 py-2.5 min-h-[44px] text-sm font-semibold text-white bg-[#1D3557] hover:bg-[#152844] rounded-md transition-colors cursor-pointer"
             >
               <Headphones className="w-4 h-4" aria-hidden="true" />
-              <span>Listen to Teaching</span>
+              <span>{fullItem.type === 'video' ? 'Listen to Audio Alternative' : 'Listen to Teaching'}</span>
             </button>
           )}
 
-          <a
-            href={fullItem.externalUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-2 px-5 py-2.5 min-h-[44px] text-sm font-medium text-[#181615] bg-white border border-[#D4CEC3] hover:bg-[#EFECE6] rounded-md transition-colors"
-          >
-            <span>Open Original Source</span>
-            <ExternalLink className="w-4 h-4" aria-hidden="true" />
-          </a>
+          {fullItem.watchUrl && (
+            <a
+              href={fullItem.watchUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 px-5 py-2.5 min-h-[44px] text-sm font-semibold text-[#181615] bg-white border border-[#D4CEC3] hover:bg-[#EFECE6] rounded-md transition-colors"
+            >
+              <span>Watch on YouTube</span>
+              <ExternalLink className="w-4 h-4" aria-hidden="true" />
+            </a>
+          )}
+
+          {(!fullItem.watchUrl || fullItem.altExternalUrl) && (
+            <a
+              href={fullItem.altExternalUrl || fullItem.externalUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 px-5 py-2.5 min-h-[44px] text-sm font-medium text-[#181615] bg-white border border-[#D4CEC3] hover:bg-[#EFECE6] rounded-md transition-colors"
+            >
+              <span>{fullItem.altExternalUrl ? 'Open Alternative Source' : 'Open Source Portal'}</span>
+              <ExternalLink className="w-4 h-4" aria-hidden="true" />
+            </a>
+          )}
 
           <button
             type="button"
@@ -154,7 +168,34 @@ export const ResourceDetailView: React.FC<ResourceDetailViewProps> = ({
             />
           ) : (
             <div className="reading-measure space-y-5 text-[16px] text-[#2B2825]">
-              {fullItem.imageUrl && (
+              {fullItem.videoEmbedUrl && (
+                <div className="mb-6 space-y-2">
+                  <div className="aspect-video w-full rounded-lg overflow-hidden border border-[#E5E0D8] bg-[#181615]">
+                    <iframe
+                      title={fullItem.title}
+                      src={fullItem.videoEmbedUrl}
+                      className="w-full h-full"
+                      referrerPolicy="strict-origin-when-cross-origin"
+                      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                      allowFullScreen
+                    />
+                  </div>
+                  <p className="text-xs text-[#6B655E]">
+                    Streamed via privacy-enhanced player. If blocked on your network, use{' '}
+                    <a
+                      href={fullItem.watchUrl || fullItem.externalUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-[#1D3557] font-semibold hover:underline"
+                    >
+                      Watch on YouTube
+                    </a>{' '}
+                    or click &ldquo;Listen to Audio Alternative&rdquo; above.
+                  </p>
+                </div>
+              )}
+
+              {!fullItem.videoEmbedUrl && fullItem.imageUrl && (
                 <div className="mb-6 rounded-lg overflow-hidden border border-[#E5E0D8] bg-[#EFECE6] max-w-md">
                   <img
                     src={fullItem.imageUrl}
@@ -173,12 +214,9 @@ export const ResourceDetailView: React.FC<ResourceDetailViewProps> = ({
               )}
               {fullItem.type === 'sermon' && (
                 <div className="p-5 bg-[#EFECE6]/70 border border-[#E5E0D8] rounded-lg space-y-2">
-                  <p className="text-sm font-semibold text-[#181615]">About this E-Library Teaching</p>
+                  <p className="text-sm font-semibold text-[#181615]">Reliable Audio &amp; Alternative Sources</p>
                   <p className="text-sm text-[#5C5750]">
-                    This teaching is streamed directly from The Covenant Nation E-Library ({fullItem.sourceSystem}).
-                    {fullItem.mediaUrl
-                      ? ' Click "Listen to Teaching" above to play the full audio here, or open it in the E-Library portal.'
-                      : ' Open the E-Library portal link above to access full message details.'}
+                    Audio is delivered through our same-origin stream relay with automatic E-Library refresh and podcast mirror fallback so playback stays consistent even when direct S3 or E-Library links are restricted.
                   </p>
                 </div>
               )}

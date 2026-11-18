@@ -5,6 +5,7 @@ import { CONTENT_INVENTORY, MINISTRY_INFO } from '../data/verifiedMinistryData.t
 interface AboutViewProps {
   stats: {
     sermonsCount: number;
+    videosCount?: number;
     articlesCount: number;
     podcastsCount: number;
     confessionsCount: number;
@@ -246,8 +247,9 @@ export const AboutView: React.FC<AboutViewProps> = ({
               Connected Ministry Sources &amp; Verification Status
             </h2>
             <p className="text-xs sm:text-sm text-[#5C5750] mt-1 tabular-nums">
-              Indexed: {stats.sermonsCount} E-Library sermons · {stats.articlesCount} WordPress articles ·{' '}
-              {stats.podcastsCount} podcast episodes · {stats.confessionsCount} confessions · {stats.centresCount} centres
+              Indexed: {stats.sermonsCount} E-Library sermons · {stats.videosCount ?? 0} video teachings ·{' '}
+              {stats.articlesCount} WordPress articles · {stats.podcastsCount} podcast episodes ·{' '}
+              {stats.confessionsCount} confessions · {stats.centresCount} centres
               {lastIndexedAt ? ` · Updated ${new Date(lastIndexedAt).toLocaleString()}` : ''}
             </p>
           </div>

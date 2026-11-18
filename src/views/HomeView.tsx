@@ -288,7 +288,7 @@ export const HomeView: React.FC<HomeViewProps> = ({
                   </div>
 
                   <div className="px-5 pb-5 pt-3 border-t border-[#F0ECE4] flex items-center justify-between">
-                    {sermon.mediaUrl ? (
+                    {sermon.mediaUrl || sermon.fallbackMediaUrl ? (
                       <button
                         type="button"
                         onClick={() => onPlayAudio(sermon)}

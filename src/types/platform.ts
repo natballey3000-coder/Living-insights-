@@ -6,6 +6,7 @@ export type ContentStatus =
 
 export type ResourceType =
   | 'sermon'
+  | 'video'
   | 'article'
   | 'podcast'
   | 'confession'
@@ -35,14 +36,23 @@ export interface UnifiedResource {
   categoryLabel: string;
   scriptures: string[];
   mediaUrl?: string;
+  fallbackMediaUrl?: string;
+  videoEmbedUrl?: string;
+  watchUrl?: string;
   externalUrl: string;
+  altExternalUrl?: string;
   imageUrl?: string;
   fileSize?: string;
   duration?: string;
   isFree?: boolean;
   price?: string;
   status: ContentStatus;
-  sourceSystem: 'E-Library API' | 'WordPress Archive' | 'Podcast RSS' | 'TCN Ministry Registry';
+  sourceSystem:
+    | 'E-Library API'
+    | 'TCN YouTube Channel'
+    | 'WordPress Archive'
+    | 'Podcast RSS'
+    | 'TCN Ministry Registry';
 }
 
 export interface SearchResultItem extends UnifiedResource {
@@ -80,6 +90,7 @@ export interface StreamStatus {
     isLive: boolean;
     status: ContentStatus;
     embedUrl: string;
+    watchUrl?: string;
     legacyWordPressUrl: string;
     youtubeChannelUrl: string;
     note: string;
@@ -148,6 +159,7 @@ export interface ContentInventoryEntry {
 
 export interface FeaturedSeries {
   title: string;
+  categoryId: string;
   allUrl: string;
   messages: Array<{
     id: string;

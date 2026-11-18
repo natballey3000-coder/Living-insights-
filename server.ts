@@ -1,6 +1,7 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import { Readable } from 'stream';
 import { fileURLToPath } from 'url';
 import {
   CONTENT_INVENTORY,
@@ -25,6 +26,8 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 const WP_BASE = 'https://insightsforliving.org/wp-json/wp/v2';
 const ELIB_BASE = 'https://api.elibrary.insightsforliving.org/v1';
+const YOUTUBE_CHANNEL_ID = 'UCsVBRhKh9spV-YPTub0KcxQ';
+const YOUTUBE_RSS_URL = `https://www.youtube.com/feeds/videos.xml?channel_id=${YOUTUBE_CHANNEL_ID}`;
 const PODCAST_FEEDS = [
   {
     name: 'Insightsforliving by The Covenant Nation',
@@ -178,6 +181,59 @@ function extractTag(block: string, tag: string): string {
   return m2 ? decodeHtmlEntities(m2[1].trim()) : '';
 }
 
+function toPrivacyYoutubeEmbed(urlOrId: string): { embedUrl: string; watchUrl: string; videoId: string } {
+  const idMatch =
+    urlOrId.match(/(?:embed\/|v=|youtu\.be\/)([A-Za-z0-9_-]{6,})/) ||
+    (/^([A-Za-z0-9_-]{6,})$/.test(urlOrId) ? [urlOrId, urlOrId] : null);
+  const videoId = idMatch ? idMatch[1] : '';
+  if (!videoId) {
+    return { embedUrl: urlOrId, watchUrl: urlOrId, videoId: '' };
+  }
+  return {
+    videoId,
+    embedUrl: `https://www.youtube-nocookie.com/embed/${videoId}?rel=0`,
+    watchUrl: `https://www.youtube.com/watch?v=${videoId}`,
+  };
+}
+
+const MATCH_NOISE = new Set([
+  'the', 'covenant', 'nation', 'pastor', 'poju', 'oyemade', 'sunday', 'service',
+  '1st', '2nd', '3rd', 'all', 'services', 'mid', 'week', 'midweek', 'with',
+  'and', 'for', 'in', 'of', 'to', 'a', 'an', 'part', 'pt', 'episode', 'ep',
+  '2024', '2025', '2026', 'november', 'october', 'december', 'january', 'february',
+  'march', 'april', 'may', 'june', 'july', 'august', 'september',
+]);
+
+function extractMatchTokens(title: string): string[] {
+  return title
+    .toLowerCase()
+    .replace(/\|+/g, ' ')
+    .replace(/[^\w\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !MATCH_NOISE.has(w) && !/^\d+$/.test(w));
+}
+
+function findMatchingResource(source: UnifiedResource, candidates: UnifiedResource[]): UnifiedResource | undefined {
+  const srcTokens = extractMatchTokens(source.title);
+  if (srcTokens.length < 2) return undefined;
+  let best: UnifiedResource | undefined;
+  let bestOverlap = 0;
+  for (const cand of candidates) {
+    const candTokens = new Set(extractMatchTokens(cand.title));
+    if (candTokens.size < 2) continue;
+    let overlap = 0;
+    for (const tok of srcTokens) {
+      if (candTokens.has(tok)) overlap++;
+    }
+    const minLen = Math.min(srcTokens.length, candTokens.size);
+    if (overlap >= 2 && overlap / minLen >= 0.6 && overlap > bestOverlap) {
+      best = cand;
+      bestOverlap = overlap;
+    }
+  }
+  return best;
+}
+
 // --- In-Memory Cache & Content Index ---
 
 interface CachedStore {
@@ -190,6 +246,7 @@ interface CachedStore {
   lastIndexedAt: string;
   stats: {
     sermonsCount: number;
+    videosCount: number;
     articlesCount: number;
     podcastsCount: number;
     confessionsCount: number;
@@ -208,6 +265,7 @@ let store: CachedStore = {
   lastIndexedAt: '',
   stats: {
     sermonsCount: 0,
+    videosCount: 0,
     articlesCount: 0,
     podcastsCount: 0,
     confessionsCount: VERIFIED_CONFESSIONS.length,
@@ -267,7 +325,7 @@ function mapElibMessage(m: any): UnifiedResource {
     categoryLabel: m.is_free === false ? `E-Library Message (${m.price || 'Paid'})` : 'E-Library Audio Teaching',
     scriptures: extractScriptures(combined),
     mediaUrl: m.file_url || undefined,
-    externalUrl: `https://elibrary.insightsforliving.org/message/${m.id}`,
+    externalUrl: 'https://elibrary.insightsforliving.org/',
     imageUrl: m.image_url || undefined,
     fileSize: m.size || undefined,
     isFree: m.is_free !== false,
@@ -280,21 +338,67 @@ function mapElibMessage(m: any): UnifiedResource {
 async function ingestAllContent(): Promise<void> {
   const allResources: UnifiedResource[] = [];
 
-  // 1. E-Library Messages (first 3 pages x 50 = 150 latest teachings)
-  const sermonPages = await Promise.all([
-    fetchJsonSafe<any>(`${ELIB_BASE}/messages/?pageNumber=1&pageSize=50`),
-    fetchJsonSafe<any>(`${ELIB_BASE}/messages/?pageNumber=2&pageSize=50`),
-    fetchJsonSafe<any>(`${ELIB_BASE}/messages/?pageNumber=3&pageSize=50`),
+  // Fetch all upstream data sources in parallel with strict timeouts so one slow endpoint never stalls the platform
+  const wpPostsPromise = (async (): Promise<any[]> => {
+    try {
+      const firstRes = await fetch(
+        `${WP_BASE}/posts?per_page=100&page=1&_fields=id,date,slug,link,title,content,excerpt,categories`,
+        { signal: AbortSignal.timeout(5500) }
+      );
+      if (!firstRes.ok) return [];
+      const totalPages = Math.min(Number(firstRes.headers.get('x-wp-totalpages')) || 1, 5);
+      const firstPosts = (await firstRes.json()) as any[];
+      const restPages = await Promise.all(
+        Array.from({ length: Math.max(0, totalPages - 1) }, (_, idx) =>
+          fetchJsonSafe<any[]>(
+            `${WP_BASE}/posts?per_page=100&page=${idx + 2}&_fields=id,date,slug,link,title,content,excerpt,categories`,
+            5500
+          )
+        )
+      );
+      return [...firstPosts, ...restPages.flatMap((p) => p || [])];
+    } catch {
+      return [];
+    }
+  })();
+
+  const [
+    sermonPage1,
+    sermonPage2,
+    sermonPage3,
+    featuredRes,
+    catsRes,
+    speakersRes,
+    wpPosts,
+    podcastXmls,
+    ytXml,
+    annRes,
+  ] = await Promise.all([
+    fetchJsonSafe<any>(`${ELIB_BASE}/messages/?pageNumber=1&pageSize=50`, 6500),
+    fetchJsonSafe<any>(`${ELIB_BASE}/messages/?pageNumber=2&pageSize=50`, 6500),
+    fetchJsonSafe<any>(`${ELIB_BASE}/messages/?pageNumber=3&pageSize=50`, 6500),
+    fetchJsonSafe<any>(`${ELIB_BASE}/messages/featured`, 6500),
+    fetchJsonSafe<any>(`${ELIB_BASE}/categories/?pageNumber=1&pageSize=50`, 6500),
+    fetchJsonSafe<any>(`${ELIB_BASE}/speakers/?pageNumber=1&pageSize=50`, 6500),
+    wpPostsPromise,
+    Promise.all(PODCAST_FEEDS.map((feed) => fetchTextSafe(feed.rssUrl, 6500))),
+    fetchTextSafe(YOUTUBE_RSS_URL, 6000),
+    fetchJsonSafe<any[]>(`${WP_BASE}/pages?slug=announcement`, 4500),
   ]);
 
+  // 1. E-Library Messages
+  const sermonPages = [sermonPage1, sermonPage2, sermonPage3];
   const seenSermons = new Set<string>();
+  const sermonItems: UnifiedResource[] = [];
   let sermonsCount = 0;
   for (const page of sermonPages) {
     if (page?.data && Array.isArray(page.data)) {
       for (const m of page.data) {
         if (m.id && !seenSermons.has(m.id)) {
           seenSermons.add(m.id);
-          allResources.push(mapElibMessage(m));
+          const mapped = mapElibMessage(m);
+          sermonItems.push(mapped);
+          allResources.push(mapped);
           sermonsCount++;
         }
       }
@@ -302,28 +406,27 @@ async function ingestAllContent(): Promise<void> {
   }
 
   // 2. E-Library Featured, Categories, Speakers
-  const [featuredRes, catsRes, speakersRes] = await Promise.all([
-    fetchJsonSafe<any>(`${ELIB_BASE}/messages/featured`),
-    fetchJsonSafe<any>(`${ELIB_BASE}/categories/?pageNumber=1&pageSize=50`),
-    fetchJsonSafe<any>(`${ELIB_BASE}/speakers/?pageNumber=1&pageSize=50`),
-  ]);
-
   const featuredSeries: FeaturedSeries[] = Array.isArray(featuredRes?.data)
-    ? featuredRes.data.map((group: any) => ({
-        title: group.title || 'Featured Series',
-        allUrl: group.all ? `https://elibrary.insightsforliving.org${group.all}` : 'https://elibrary.insightsforliving.org/',
-        messages: Array.isArray(group.messages)
-          ? group.messages.map((item: any) => ({
-              id: item.id,
-              name: item.name || item.topic || 'Series',
-              topic: item.topic || item.name || '',
-              description: (item.description || '').replace(/\r\n/g, ' ').trim(),
-              bannerUrl: item.banner_url || undefined,
-              created: item.created || '',
-            }))
-          : [],
-      }))
-    : [];
+    ? featuredRes.data.map((group: any) => {
+        const rawAll = String(group.all || '');
+        const categoryId = rawAll.replace(/^\/?categories\//, '').replace(/\/$/, '').trim();
+        return {
+          title: group.title || 'Featured Series',
+          categoryId,
+          allUrl: 'https://elibrary.insightsforliving.org/',
+          messages: Array.isArray(group.messages)
+            ? group.messages.map((item: any) => ({
+                id: item.id,
+                name: item.name || item.topic || 'Series',
+                topic: item.topic || item.name || '',
+                description: (item.description || '').replace(/\r\n/g, ' ').trim(),
+                bannerUrl: item.banner_url || undefined,
+                created: item.created || '',
+              }))
+            : [],
+        };
+      })
+    : store.featuredSeries;
 
   const categories = Array.isArray(catsRes?.data)
     ? catsRes.data.map((c: any) => ({
@@ -332,7 +435,7 @@ async function ingestAllContent(): Promise<void> {
         topic: c.topic || '',
         description: (c.description || '').trim(),
       }))
-    : [];
+    : store.categories;
 
   const speakers = Array.isArray(speakersRes?.data)
     ? speakersRes.data.map((s: any) => ({
@@ -341,57 +444,50 @@ async function ingestAllContent(): Promise<void> {
         title: s.title || '',
         image: s.image || undefined,
       }))
-    : [];
+    : store.speakers;
 
-  // 3. WordPress Posts (all pages, 100 per page)
+  // 3. WordPress Posts (fallback to previously cached WP articles if WP returns HTTP 500/timeout)
   let articlesCount = 0;
-  try {
-    const firstRes = await fetch(`${WP_BASE}/posts?per_page=100&page=1&_fields=id,date,slug,link,title,content,excerpt,categories`);
-    if (firstRes.ok) {
-      const totalPages = Math.min(Number(firstRes.headers.get('x-wp-totalpages')) || 1, 5);
-      const firstPosts = (await firstRes.json()) as any[];
-      const restPages = await Promise.all(
-        Array.from({ length: Math.max(0, totalPages - 1) }, (_, idx) =>
-          fetchJsonSafe<any[]>(
-            `${WP_BASE}/posts?per_page=100&page=${idx + 2}&_fields=id,date,slug,link,title,content,excerpt,categories`
-          )
-        )
-      );
-      const allPosts = [...firstPosts, ...restPages.flatMap((p) => p || [])];
-      for (const post of allPosts) {
-        const title = decodeHtmlEntities(post.title?.rendered || 'Untitled Article');
-        const cleanBody = stripHtml(post.content?.rendered || '');
-        const cleanExcerpt = stripHtml(post.excerpt?.rendered || '') || cleanBody.slice(0, 220);
-        const dateStr = (post.date || '').slice(0, 10);
-        const year = dateStr ? new Date(dateStr).getFullYear() : null;
-        const combined = `${title} ${cleanBody}`;
-        allResources.push({
-          id: `article-${post.id}`,
-          type: 'article',
-          title,
-          speakerOrAuthor: 'Insights for Living Editorial · The Covenant Nation',
-          date: dateStr,
-          year: year && !Number.isNaN(year) ? year : null,
-          summary: cleanExcerpt.length > 210 ? `${cleanExcerpt.slice(0, 207)}...` : cleanExcerpt,
-          fullText: sanitizeHtml(post.content?.rendered || ''),
-          topics: classifyTopics(combined),
-          categoryLabel: 'WordPress Article Archive',
-          scriptures: extractScriptures(combined),
-          externalUrl: post.link || `https://insightsforliving.org/?p=${post.id}`,
-          status: year && year >= 2023 ? 'Verified and current' : 'Historical or archived',
-          sourceSystem: 'WordPress Archive',
-        });
-        articlesCount++;
-      }
+  if (wpPosts.length > 0) {
+    for (const post of wpPosts) {
+      const title = decodeHtmlEntities(post.title?.rendered || 'Untitled Article');
+      const cleanBody = stripHtml(post.content?.rendered || '');
+      const cleanExcerpt = stripHtml(post.excerpt?.rendered || '') || cleanBody.slice(0, 220);
+      const dateStr = (post.date || '').slice(0, 10);
+      const year = dateStr ? new Date(dateStr).getFullYear() : null;
+      const combined = `${title} ${cleanBody}`;
+      allResources.push({
+        id: `article-${post.id}`,
+        type: 'article',
+        title,
+        speakerOrAuthor: 'Insights for Living Editorial · The Covenant Nation',
+        date: dateStr,
+        year: year && !Number.isNaN(year) ? year : null,
+        summary: cleanExcerpt.length > 210 ? `${cleanExcerpt.slice(0, 207)}...` : cleanExcerpt,
+        fullText: sanitizeHtml(post.content?.rendered || ''),
+        topics: classifyTopics(combined),
+        categoryLabel: 'WordPress Article Archive',
+        scriptures: extractScriptures(combined),
+        externalUrl: post.link || `https://insightsforliving.org/?p=${post.id}`,
+        status: year && year >= 2023 ? 'Verified and current' : 'Historical or archived',
+        sourceSystem: 'WordPress Archive',
+      });
+      articlesCount++;
     }
-  } catch {
-    // Keep going gracefully if WP is momentarily unreachable
+  } else {
+    const prevArticles = store.resources.filter((r) => r.type === 'article');
+    for (const art of prevArticles) {
+      allResources.push(art);
+      articlesCount++;
+    }
   }
 
-  // 4. Podcast RSS Feeds (first 40 episodes per feed for fast unified indexing)
+  // 4. Podcast RSS Feeds (first 45 episodes per feed for fast unified indexing)
   let podcastsCount = 0;
-  for (const feed of PODCAST_FEEDS) {
-    const xml = await fetchTextSafe(feed.rssUrl, 12000);
+  const podcastItems: UnifiedResource[] = [];
+  for (let fIdx = 0; fIdx < PODCAST_FEEDS.length; fIdx++) {
+    const feed = PODCAST_FEEDS[fIdx];
+    const xml = podcastXmls[fIdx];
     if (!xml) continue;
     const itemMatches = [...xml.matchAll(/<item>([\s\S]*?)<\/item>/g)].slice(0, 45);
     for (let i = 0; i < itemMatches.length; i++) {
@@ -412,7 +508,7 @@ async function ingestAllContent(): Promise<void> {
       const combined = `${title} ${cleanDesc}`;
       const speakerMatch = cleanDesc.match(/By\s+(Pastor\s+[A-Za-z\s.'’]+)/i);
 
-      allResources.push({
+      const podItem: UnifiedResource = {
         id: `podcast-${Buffer.from(guid).toString('base64url').slice(0, 18)}-${i}`,
         type: 'podcast',
         title,
@@ -426,12 +522,87 @@ async function ingestAllContent(): Promise<void> {
         scriptures: extractScriptures(combined),
         mediaUrl,
         externalUrl: link,
+        altExternalUrl: feed.showUrl,
         duration: duration || undefined,
         isFree: true,
         status: 'Verified and current',
         sourceSystem: 'Podcast RSS',
-      });
+      };
+      podcastItems.push(podItem);
+      allResources.push(podItem);
       podcastsCount++;
+    }
+  }
+
+  // 4b. TCN YouTube Channel Video Teachings RSS
+  let videosCount = 0;
+  const videoItems: UnifiedResource[] = [];
+  if (ytXml) {
+    const entryMatches = [...ytXml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)].slice(0, 15);
+    for (const m of entryMatches) {
+      const block = m[1];
+      const videoId = extractTag(block, 'yt:videoId');
+      const rawTitle = extractTag(block, 'title');
+      if (!videoId || !rawTitle) continue;
+      const title = decodeHtmlEntities(rawTitle).replace(/\s+/g, ' ').trim();
+      const rawDesc = extractTag(block, 'media:description');
+      const cleanDesc = stripHtml(rawDesc).slice(0, 320);
+      const published = extractTag(block, 'published');
+      const isoDate = published ? published.slice(0, 10) : '';
+      const year = isoDate ? new Date(isoDate).getFullYear() : null;
+      const { embedUrl, watchUrl } = toPrivacyYoutubeEmbed(videoId);
+      const combined = `${title} ${cleanDesc}`;
+
+      const videoRes: UnifiedResource = {
+        id: `video-${videoId}`,
+        type: 'video',
+        title,
+        speakerOrAuthor: title.toLowerCase().includes('poju')
+          ? 'Pastor Poju Oyemade · The Covenant Nation'
+          : 'The Covenant Nation Broadcast',
+        date: isoDate,
+        year: year && !Number.isNaN(year) ? year : null,
+        summary: cleanDesc || `${title} — Official video service recording from The Covenant Nation.`,
+        fullText: stripHtml(rawDesc),
+        topics: classifyTopics(combined),
+        categoryLabel: 'Video Teaching (TCN YouTube)',
+        scriptures: extractScriptures(combined),
+        videoEmbedUrl: embedUrl,
+        watchUrl,
+        externalUrl: watchUrl,
+        imageUrl: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+        isFree: true,
+        status: 'Verified and current',
+        sourceSystem: 'TCN YouTube Channel',
+      };
+      videoItems.push(videoRes);
+      allResources.push(videoRes);
+      videosCount++;
+    }
+  }
+
+  // Cross-match fallback/alternative sources so blocked video or expired S3 audio always has a working alternate
+  const audioPool = [...podcastItems, ...sermonItems.filter((s) => Boolean(s.mediaUrl))];
+  for (const sermon of sermonItems) {
+    const matchedPodcast = findMatchingResource(sermon, podcastItems);
+    const matchedVideo = findMatchingResource(sermon, videoItems);
+    if (matchedPodcast) {
+      sermon.fallbackMediaUrl = matchedPodcast.mediaUrl;
+      sermon.altExternalUrl = matchedPodcast.externalUrl;
+    } else if (matchedVideo) {
+      sermon.altExternalUrl = matchedVideo.watchUrl;
+    }
+    if (matchedVideo) {
+      sermon.videoEmbedUrl = matchedVideo.videoEmbedUrl;
+      sermon.watchUrl = matchedVideo.watchUrl;
+    }
+  }
+  for (const video of videoItems) {
+    const matchedAudio = findMatchingResource(video, audioPool);
+    if (matchedAudio && matchedAudio.mediaUrl) {
+      video.mediaUrl = `/api/media/audio/${encodeURIComponent(matchedAudio.id)}`;
+      video.fallbackMediaUrl = matchedAudio.mediaUrl;
+      video.altExternalUrl = matchedAudio.externalUrl;
     }
   }
 
@@ -495,10 +666,11 @@ async function ingestAllContent(): Promise<void> {
     });
   }
 
-  // 6. Announcements page
-  const annRes = await fetchJsonSafe<any[]>(`${WP_BASE}/pages?slug=announcement`);
-  const annHtml = annRes?.[0]?.content?.rendered ? sanitizeHtml(annRes[0].content.rendered) : '';
-  const annDate = annRes?.[0]?.modified ? annRes[0].modified.slice(0, 10) : '';
+  // 6. Announcements page (preserve previous if WP timeout)
+  const annHtml = annRes?.[0]?.content?.rendered
+    ? sanitizeHtml(annRes[0].content.rendered)
+    : store.announcementsHtml;
+  const annDate = annRes?.[0]?.modified ? annRes[0].modified.slice(0, 10) : store.announcementsDate;
 
   store = {
     resources: allResources,
@@ -510,6 +682,7 @@ async function ingestAllContent(): Promise<void> {
     lastIndexedAt: new Date().toISOString(),
     stats: {
       sermonsCount,
+      videosCount,
       articlesCount,
       podcastsCount,
       confessionsCount: VERIFIED_CONFESSIONS.length,
@@ -640,8 +813,9 @@ async function createApp() {
   app.get('/api/overview', async (_req, res) => {
     await ensureIndexFresh();
     const recentSermons = store.resources.filter((r) => r.type === 'sermon').slice(0, 6);
+    const recentVideos = store.resources.filter((r) => r.type === 'video').slice(0, 12);
     const recentArticles = store.resources.filter((r) => r.type === 'article').slice(0, 6);
-    const recentPodcasts = store.resources.filter((r) => r.type === 'podcast').slice(0, 8);
+    const recentPodcasts = store.resources.filter((r) => r.type === 'podcast').slice(0, 10);
     res.json({
       stats: store.stats,
       lastIndexedAt: store.lastIndexedAt,
@@ -649,6 +823,7 @@ async function createApp() {
       categories: store.categories,
       speakers: store.speakers,
       recentSermons,
+      recentVideos,
       recentArticles,
       recentPodcasts,
       announcementsHtml: store.announcementsHtml,
@@ -671,18 +846,124 @@ async function createApp() {
     });
   });
 
+  // Same-Origin Audio Stream Proxy with HTTP Range Support & Automatic Fallback
+  app.get('/api/media/audio/:id', async (req, res) => {
+    await ensureIndexFresh();
+    const resourceId = req.params.id;
+    let item = store.resources.find((r) => r.id === resourceId);
+
+    if (!item && resourceId.startsWith('sermon-')) {
+      const elibId = resourceId.replace('sermon-', '');
+      const single = await fetchJsonSafe<any>(`${ELIB_BASE}/messages/${encodeURIComponent(elibId)}`, 8000);
+      if (single?.data) {
+        item = mapElibMessage(single.data);
+        store.resources.push(item);
+      }
+    }
+
+    if (!item) {
+      res.status(404).json({ error: 'Audio teaching not found.' });
+      return;
+    }
+
+    const candidates: string[] = [];
+    if (item.mediaUrl && !item.mediaUrl.startsWith('/api/media/')) {
+      candidates.push(item.mediaUrl);
+    }
+    // If S3 sermon URL might be expired or missing, check fresh E-Library signed URL too
+    if (item.id.startsWith('sermon-')) {
+      const elibId = item.id.replace('sermon-', '');
+      if (candidates.length === 0) {
+        const single = await fetchJsonSafe<any>(`${ELIB_BASE}/messages/${encodeURIComponent(elibId)}`, 8000);
+        if (single?.data?.file_url) {
+          item.mediaUrl = single.data.file_url;
+          candidates.push(single.data.file_url);
+        }
+      }
+    }
+    if (item.fallbackMediaUrl && !candidates.includes(item.fallbackMediaUrl)) {
+      candidates.push(item.fallbackMediaUrl);
+    }
+
+    const rangeHeader = req.headers.range;
+
+    const tryStream = async (url: string): Promise<Response | null> => {
+      try {
+        const headers: Record<string, string> = {};
+        if (rangeHeader) headers.Range = rangeHeader;
+        const upstream = await fetch(url, { headers, redirect: 'follow' });
+        if (upstream.ok || upstream.status === 206) {
+          return upstream;
+        }
+      } catch {
+        // try next candidate
+      }
+      return null;
+    };
+
+    let upstreamRes: Response | null = null;
+    for (let i = 0; i < candidates.length; i++) {
+      upstreamRes = await tryStream(candidates[i]);
+      if (upstreamRes) break;
+      // If first S3 candidate failed (expired presigned URL), refresh it once from E-Library API
+      if (i === 0 && item.id.startsWith('sermon-')) {
+        const elibId = item.id.replace('sermon-', '');
+        const refreshed = await fetchJsonSafe<any>(`${ELIB_BASE}/messages/${encodeURIComponent(elibId)}`, 8000);
+        if (refreshed?.data?.file_url && refreshed.data.file_url !== candidates[0]) {
+          item.mediaUrl = refreshed.data.file_url;
+          upstreamRes = await tryStream(refreshed.data.file_url);
+          if (upstreamRes) break;
+        }
+      }
+    }
+
+    if (!upstreamRes || !upstreamRes.body) {
+      res.status(502).json({ error: 'Upstream audio stream is temporarily unavailable.' });
+      return;
+    }
+
+    res.status(upstreamRes.status);
+    res.setHeader('Content-Type', upstreamRes.headers.get('content-type') || 'audio/mpeg');
+    const contentLength = upstreamRes.headers.get('content-length');
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+    const contentRange = upstreamRes.headers.get('content-range');
+    if (contentRange) res.setHeader('Content-Range', contentRange);
+    res.setHeader('Accept-Ranges', upstreamRes.headers.get('accept-ranges') || 'bytes');
+    res.setHeader('Cache-Control', 'private, max-age=1800');
+
+    const nodeStream = Readable.fromWeb(upstreamRes.body as any);
+    req.on('close', () => {
+      nodeStream.destroy();
+    });
+    nodeStream.on('error', () => {
+      if (!res.headersSent) res.status(502).end();
+      else res.end();
+    });
+    nodeStream.pipe(res);
+  });
+
   // Live Verification of Radio, Audio Mixlr, & Video Stream
   app.get('/api/streams/status', async (_req, res) => {
+    await ensureIndexFresh();
     const now = new Date().toISOString();
     const [mixlrData, elibStream, radioCheck] = await Promise.all([
-      fetchJsonSafe<any>('https://api.mixlr.com/users/5449585', 7000),
-      fetchJsonSafe<any>(`${ELIB_BASE}/misc/stream`, 7000),
-      fetch('https://insightsforliving.org/radio/', { method: 'HEAD' }).catch(() => null),
+      fetchJsonSafe<any>('https://api.mixlr.com/users/5449585', 4500),
+      fetchJsonSafe<any>(`${ELIB_BASE}/misc/stream`, 4500),
+      fetch('https://insightsforliving.org/radio/', {
+        method: 'HEAD',
+        signal: AbortSignal.timeout(3000),
+      }).catch(() => null),
     ]);
 
     const radioStatus = radioCheck ? radioCheck.status : 0;
     const isMixlrLive = Boolean(mixlrData?.is_live);
-    const streamUrl = elibStream?.data?.stream || '';
+    const rawStreamUrl = elibStream?.data?.stream || '';
+    const latestVideo = store.resources.find((r) => r.type === 'video');
+    const normalized = rawStreamUrl
+      ? toPrivacyYoutubeEmbed(rawStreamUrl)
+      : latestVideo?.videoEmbedUrl
+      ? { embedUrl: latestVideo.videoEmbedUrl, watchUrl: latestVideo.watchUrl || latestVideo.externalUrl }
+      : { embedUrl: '', watchUrl: 'https://www.youtube.com/c/CovenantChristianCentreNG' };
 
     const payload: StreamStatus = {
       audioStream: {
@@ -698,13 +979,14 @@ async function createApp() {
       videoStream: {
         name: 'Covenant Nation Video Broadcast',
         isLive: false,
-        status: streamUrl ? 'Requires administrative verification' : 'Temporarily unavailable',
-        embedUrl: streamUrl,
+        status: normalized.embedUrl ? 'Verified and current' : 'Requires administrative verification',
+        embedUrl: normalized.embedUrl,
+        watchUrl: normalized.watchUrl,
         legacyWordPressUrl: 'https://insightsforliving.org/livestream/',
         youtubeChannelUrl: 'https://www.youtube.com/c/CovenantChristianCentreNG',
-        note: streamUrl
-          ? 'Video stream endpoint retrieved from E-Library API (/misc/stream). Live status requires service-hour verification; legacy WordPress /livestream/ embeds a 2018 broadcast.'
-          : 'No active video stream endpoint returned.',
+        note: normalized.embedUrl
+          ? 'Loaded using privacy-enhanced streaming (youtube-nocookie.com) for reliable playback, alongside direct YouTube watch and audio-only alternatives.'
+          : 'No active video stream endpoint returned. Browse recent Video Teachings or listen via Mixlr Audio.',
         lastChecked: now,
       },
       covenantRadio: {
@@ -716,7 +998,7 @@ async function createApp() {
         diagnosticNote:
           radioStatus === 200
             ? 'Covenant Radio endpoint responded normally.'
-            : `Original destination insightsforliving.org/radio/ returned HTTP ${radioStatus || 'error'}. Flagged for administrative resolution instead of rendering a broken player.`,
+            : `Original destination insightsforliving.org/radio/ returned HTTP ${radioStatus || 'error'}. Use the verified Mixlr audio stream or recorded teachings below instead.`,
         fallbackActionLabel: 'Listen via Verified Mixlr Audio Stream or Recorded Teachings',
       },
     };
@@ -882,9 +1164,18 @@ async function createApp() {
       rawList.map(async (m: any) => {
         const cached = store.resources.find((r) => r.id === `sermon-${m.id}`);
         if (cached && cached.mediaUrl) return cached;
-        if (m.file_url) return mapElibMessage(m);
-        const detail = await fetchJsonSafe<any>(`${ELIB_BASE}/messages/${encodeURIComponent(m.id)}`, 5000);
-        return detail?.data ? mapElibMessage(detail.data) : mapElibMessage(m);
+        let mapped: UnifiedResource;
+        if (m.file_url) {
+          mapped = mapElibMessage(m);
+        } else {
+          const detail = await fetchJsonSafe<any>(`${ELIB_BASE}/messages/${encodeURIComponent(m.id)}`, 5000);
+          mapped = detail?.data ? mapElibMessage(detail.data) : mapElibMessage(m);
+        }
+        // Cache in store so /api/media/audio/:id can serve & auto-refresh it
+        if (!store.resources.some((r) => r.id === mapped.id)) {
+          store.resources.push(mapped);
+        }
+        return mapped;
       })
     );
     res.json({

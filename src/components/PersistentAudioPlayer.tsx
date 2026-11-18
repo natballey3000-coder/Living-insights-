@@ -32,14 +32,37 @@ export const PersistentAudioPlayer: React.FC<PersistentAudioPlayerProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [resumedFrom, setResumedFrom] = useState<number | null>(null);
+  const [sourceIndex, setSourceIndex] = useState(0);
+  const [activeLabel, setActiveLabel] = useState<'Primary Proxy' | 'Alternative Mirror'>('Primary Proxy');
+
+  const candidates = React.useMemo(() => {
+    if (!track) return [];
+    const list: string[] = [];
+    if (track.mediaUrl || track.fallbackMediaUrl) {
+      list.push(`/api/media/audio/${encodeURIComponent(track.id)}`);
+    }
+    if (track.fallbackMediaUrl && !list.includes(track.fallbackMediaUrl)) {
+      list.push(track.fallbackMediaUrl);
+    }
+    if (track.mediaUrl && !track.mediaUrl.startsWith('/api/media/') && !list.includes(track.mediaUrl)) {
+      list.push(track.mediaUrl);
+    }
+    return list;
+  }, [track?.id, track?.mediaUrl, track?.fallbackMediaUrl]);
 
   useEffect(() => {
-    if (!track?.mediaUrl || !audioRef.current) return;
+    setSourceIndex(0);
+    setActiveLabel('Primary Proxy');
+  }, [track?.id]);
+
+  useEffect(() => {
+    const src = candidates[sourceIndex];
+    if (!track || !src || !audioRef.current) return;
     setLoadError(null);
     setResumedFrom(null);
 
     const audio = audioRef.current;
-    audio.src = track.mediaUrl;
+    audio.src = src;
     audio.playbackRate = playbackRate;
 
     try {
@@ -59,7 +82,7 @@ export const PersistentAudioPlayer: React.FC<PersistentAudioPlayerProps> = ({
       .play()
       .then(() => setIsPlaying(true))
       .catch(() => setIsPlaying(false));
-  }, [track?.id, track?.mediaUrl]);
+  }, [track?.id, sourceIndex, candidates]);
 
   useEffect(() => {
     if (audioRef.current) {
@@ -76,7 +99,14 @@ export const PersistentAudioPlayer: React.FC<PersistentAudioPlayerProps> = ({
       audio
         .play()
         .then(() => setIsPlaying(true))
-        .catch(() => setLoadError('Audio playback could not start. Try opening the source link directly.'));
+        .catch(() => {
+          if (sourceIndex + 1 < candidates.length) {
+            setActiveLabel('Alternative Mirror');
+            setSourceIndex((idx) => idx + 1);
+          } else {
+            setLoadError('Audio playback could not start. Try the alternative source link.');
+          }
+        });
     } else {
       audio.pause();
       setIsPlaying(false);
@@ -133,8 +163,13 @@ export const PersistentAudioPlayer: React.FC<PersistentAudioPlayerProps> = ({
         }}
         onEnded={() => setIsPlaying(false)}
         onError={() => {
-          setIsPlaying(false);
-          setLoadError('Audio stream unavailable in browser player. Use Open Source below.');
+          if (sourceIndex + 1 < candidates.length) {
+            setActiveLabel('Alternative Mirror');
+            setSourceIndex((idx) => idx + 1);
+          } else {
+            setIsPlaying(false);
+            setLoadError('Primary and fallback audio streams could not connect. Open Alternative Source.');
+          }
         }}
       />
 
@@ -150,6 +185,7 @@ export const PersistentAudioPlayer: React.FC<PersistentAudioPlayerProps> = ({
             </button>
             <p className="text-xs text-[#B8B1A8] truncate">
               {track.speakerOrAuthor}
+              {activeLabel === 'Alternative Mirror' ? ' · Alternative Source' : ''}
               {resumedFrom ? ` · Resumed from ${formatTime(resumedFrom)}` : ''}
             </p>
             {loadError && <p className="text-xs text-amber-300 mt-0.5">{loadError}</p>}
@@ -219,10 +255,10 @@ export const PersistentAudioPlayer: React.FC<PersistentAudioPlayerProps> = ({
           </button>
 
           <a
-            href={track.externalUrl}
+            href={track.altExternalUrl || track.externalUrl}
             target="_blank"
             rel="noopener noreferrer"
-            aria-label="Open original teaching page"
+            aria-label="Open alternative teaching source"
             className="min-h-[40px] px-2.5 inline-flex items-center gap-1 text-xs text-[#B8B1A8] hover:text-white whitespace-nowrap shrink-0"
           >
             <span>Source</span>
