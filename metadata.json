@@ -1,0 +1,6 @@
+{
+  "name": "Insights for Living — The Word, In Real Life",
+  "description": "The everyday Christian understanding platform by The Covenant Nation. Discover biblical wisdom for real-life questions through sermons, articles, podcasts, confessions, and community.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
